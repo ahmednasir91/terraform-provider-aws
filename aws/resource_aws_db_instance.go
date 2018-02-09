@@ -431,6 +431,43 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 		if err != nil {
 			return fmt.Errorf("Error creating DB Instance: %s", err)
 		}
+
+		// "Note: All Read Replica DB instances are created with backups disabled."
+		// https://docs.aws.amazon.com/goto/WebAPI/rds-2014-10-31/CreateDBInstanceReadReplica mentions
+		// This blocks the way for a replica to become a source, for example if we want replica of replica
+		// or multi-level replicas.
+		if attr, ok := d.GetOk("backup_retention_period"); ok && attr.(int) > 0 {
+			log.Printf("[INFO] Updating backup retention period after creation of replica.")
+
+			// wait for instance to get up and then modify retention period
+			d.SetId(d.Get("identifier").(string))
+
+			log.Printf("[INFO] DB Instance ID: %s", d.Id())
+
+			log.Println(
+				"[INFO] Waiting for DB Instance to be available")
+
+			stateConf := &resource.StateChangeConf{
+				Pending:    resourceAwsDbInstanceCreatePendingStates,
+				Target:     []string{"available"},
+				Refresh:    resourceAwsDbInstanceStateRefreshFunc(d.Id(), conn),
+				Timeout:    d.Timeout(schema.TimeoutCreate),
+				MinTimeout: 10 * time.Second,
+				Delay:      30 * time.Second, // Wait 30 secs before starting
+			}
+
+			// Wait, catching any errors
+			_, err := stateConf.WaitForState()
+			if err != nil {
+				return err
+			}
+
+			err = resourceAwsDbInstanceUpdate(d, meta)
+			if err != nil {
+				return err
+			}
+		}
+
 	} else if _, ok := d.GetOk("snapshot_identifier"); ok {
 		opts := rds.RestoreDBInstanceFromDBSnapshotInput{
 			DBInstanceClass:         aws.String(d.Get("instance_class").(string)),
